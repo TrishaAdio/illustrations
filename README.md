@@ -102,6 +102,38 @@ at both ends so they read as a nib lifting, stop just short of the outline rathe
 butting into it, and vary in width along their length. Fill edges are wobbled to match.
 Perfectly straight hatching reads as machine output instantly.
 
+## The character
+
+[**অখিলেশ বোস — Akhilesh Bose**](characters/akhilesh-bose.md) is the original
+protagonist this repository exists to illustrate: a retired railway signal
+engineer in a small junction town in 1963, who solves crimes by noticing what ran
+late. Deliberately built by inverting the familiar model — sixty-one, short,
+limping, unlicensed, slow, and not brilliant. The character notes cover method,
+physical silhouette, the people around him, and recurring visual motifs.
+
+![Akhilesh Bose](plates/akhilesh-bose.preview.jpg)
+
+An invented character has no reference photograph, so his plate is
+**hand-authored geometry rendered through kalam's own primitives** — see
+[`plates/akhilesh_bose.py`](plates/akhilesh_bose.py). Control points are smoothed
+with Catmull-Rom, rasterised to masks, then hatched and outlined by the same
+engines the photographic presets use, so the plate shares their hand.
+
+It is honestly a mediocre drawing. The composition, ink, paper and second-colour
+registration are good; the face is not. Hand-authoring a convincing head by
+nudging coordinates has sharp diminishing returns, and the fix is the one a real
+illustrator would reach for — **work from reference**. Rendering an actual
+photograph of a suitable sitter produces something far better:
+
+![reference study](plates/studies/reference-study-comparison.jpg)
+
+*`feluda`, `linocut`, `stipple` on a photographic reference. The outer two work;
+`linocut` over-reduces and inverts the tone.*
+
+So the production route for the books is: photograph a model in the character's
+costume and pose, then run the plate. The hand-authored script stays useful for
+ornaments, motifs and lettering, where geometry beats reference.
+
 ## Known limitations
 
 - **Background removal (`--isolate`) is unreliable.** Flood-fill from the frame edge
