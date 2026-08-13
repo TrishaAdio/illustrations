@@ -259,7 +259,11 @@ def render_plate(
             1.0,
         ).astype(np.float32)
 
-    masks = core.quantise(banding, preset.thresholds(), preset.prep)
+    # Resolve thresholds against this image's own tonal distribution, so a dark
+    # or backlit sitter does not collapse into one solid mass.
+    cuts = core.resolve_thresholds(banding, preset.thresholds(), preset.prep.adaptive)
+
+    masks = core.quantise(banding, cuts, preset.prep)
     flow = core.flow_field(prepared)
     weight = core.vignette_falloff((h, w), preset.vignette)
 
@@ -275,16 +279,17 @@ def render_plate(
     # a contour map of blobs. Cumulative passes bury each boundary under the
     # next pass, so tone gradates smoothly and no coastlines survive.
     density = np.clip(1.0 - prepared, 0.0, 1.0)
-    passes = list(reversed(preset.bands)) if preset.layered else list(preset.bands)
+    indexed = list(enumerate(preset.bands))
+    passes = list(reversed(indexed)) if preset.layered else indexed
 
-    for order, spec in enumerate(passes):
+    for i, spec in passes:
         if preset.layered:
             if spec.mode in ("none", "blank", "paper"):
                 continue
-            mask = banding <= spec.threshold
+            # cuts[i] is spec.threshold resolved against this image
+            mask = banding <= cuts[i]
             mask = core.clean_mask(mask, min_area=max(24, int(w * h * 0.0004)), close=5)
         else:
-            i = preset.bands.index(spec)
             if i >= len(masks):
                 continue
             mask = masks[i]

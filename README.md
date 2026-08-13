@@ -92,6 +92,20 @@ the codebase.
 destroys the global light-and-shadow hierarchy — the coherent shadow mass of a face
 shatters into scattered specks, and the plate becomes unreadable. Global levels only.
 
+**Thresholds are coverage quantiles, not luma values.** A band threshold of 0.21
+means "the darkest 21% of this plate", not "luma below 0.21". Absolute thresholds
+silently assume a mid-tone, well-exposed, light-skinned subject; a dark-skinned
+sitter or a backlit frame drops the entire face below the solid-black cut and the
+plate becomes a silhouette. A consequence worth knowing: `--gamma` can no longer
+change how much ink appears, because percentiles are invariant under any
+monotonic tone curve. Use `--coverage` for that.
+
+**Illumination is divided out before grading.** Removing CLAHE (above) cost the
+ability to handle uneven light. Dividing by a heavily blurred copy separates
+lighting from reflectance, which flattens a lighting gradient without the
+mass-shattering side effect of local equalisation. It cannot rescue dappled
+light, which is mid-frequency and indistinguishable from real structure.
+
 **Quantise small, draw large.** Bands are decided at ~40% resolution on an index map.
 A pen drawing of a face is not a per-pixel decision about every pore; it is a handful
 of decisive regions. Deciding regions coarsely and drawing them at full resolution is
@@ -134,8 +148,32 @@ So the production route for the books is: photograph a model in the character's
 costume and pose, then run the plate. The hand-authored script stays useful for
 ornaments, motifs and lettering, where geometry beats reference.
 
+### Casting the sitter
+
+Two candidate sitters were sourced from Commons and run through the pipeline. The
+result was unambiguous, and not what tuning would predict:
+
+![casting](plates/studies/casting-comparison.jpg)
+
+*Sitter, `feluda`, `feluda --coverage 0.62`, `stipple`.*
+
+**Reference selection dominates every parameter in the tool.** The first sitter
+was photographed in dappled shade under a tree and produced camouflage - see
+[`plates/studies/sitter-dappled-failure.jpg`](plates/studies/sitter-dappled-failure.jpg).
+Leaf shadows are mid-frequency tonal features, indistinguishable from real facial
+structure, so no amount of illumination correction removes them. The second
+sitter, in even light against a plain wall, produced a legible portrait
+immediately, with no tuning at all.
+
+The full casting and photography spec is in [CREDITS.md](CREDITS.md), along with
+the licence of every reference image and why that matters for a published book.
+Short version: **even soft light, no dappled shade, plain background, head and
+shoulders filling the frame.**
+
 ## Known limitations
 
+- **Reference quality dominates everything.** Dappled light is fatal; see the
+  casting spec in [CREDITS.md](CREDITS.md). No parameter compensates for it.
 - **Background removal (`--isolate`) is unreliable.** Flood-fill from the frame edge
   works on plain studio backdrops; anything busy, or dark hair against a dark corner,
   and it leaks. It fails safe — a bad mask is discarded rather than used. A tight crop

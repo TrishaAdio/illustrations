@@ -63,8 +63,11 @@ class PrepConfig:
     smooth_colour: float = 55.0
 
     # --- grading -----------------------------------------------------------
+    illumination: float = 0.65  # divide out uneven lighting; 0 disables
+    illumination_sigma: float = 0.16  # blur radius as a share of the short edge
     clahe_clip: float = 0.0  # 0 disables local contrast
     clahe_grid: int = 8
+    adaptive: bool = True  # read band thresholds as coverage quantiles
     gamma: float = 1.0  # <1 lightens, >1 darkens
     exposure: float = 0.0  # additive, in luma units
     autolevel: bool = True
@@ -98,9 +101,61 @@ def flatten(img: Image.Image, cfg: PrepConfig) -> Image.Image:
     return Image.fromarray(cv2.cvtColor(flat, cv2.COLOR_BGR2RGB), mode="RGB")
 
 
+def correct_illumination(luma: Array, strength: float = 0.65, sigma_frac: float = 0.16) -> Array:
+    """Divide out the low-frequency lighting, keeping structure.
+
+    This resolves a real tension. Global tone alone produces coherent ink masses
+    but cannot cope with uneven light: a face in shade against a bright sky sits
+    entirely below the darkest threshold and floods to solid black. CLAHE copes
+    with the lighting but shatters those masses into specks.
+
+    Dividing by a heavily blurred copy separates illumination from reflectance,
+    which is a much gentler operation than local histogram equalisation. The
+    lighting gradient goes; the mid-frequency structure that makes a face a face
+    stays; masses remain coherent.
+    """
+    if strength <= 0:
+        return luma
+    h, w = luma.shape
+    sigma = max(4.0, sigma_frac * min(h, w))
+    illum = cv2.GaussianBlur(luma, (0, 0), sigma)
+    mean = float(illum.mean()) or 1.0
+    flat = luma / (illum + 1e-4) * mean
+    out = luma * (1.0 - strength) + flat * strength
+    return np.clip(out, 0.0, 1.0).astype(np.float32)
+
+
+def resolve_thresholds(luma: Array, thresholds: list[float], adaptive: bool = True) -> list[float]:
+    """Turn preset thresholds into cut values for this particular image.
+
+    In adaptive mode a threshold is read as a *coverage quantile* rather than an
+    absolute luma: 0.21 means "the darkest 21% of the plate", not "luma below
+    0.21". That is what the numbers were always intended to mean, and it makes a
+    preset survive a dark-skinned sitter, an underexposed scan or a backlit
+    frame - all of which otherwise dump the whole subject into solid black.
+    """
+    ts = [float(t) for t in thresholds]
+    if not adaptive:
+        return ts
+    out: list[float] = []
+    for t in ts:
+        if t >= 1.0:
+            out.append(1.0 + 1e-3)
+        else:
+            out.append(float(np.percentile(luma, 100.0 * max(0.0, min(1.0, t)))))
+    # keep strictly increasing so np.digitize stays well behaved
+    for i in range(1, len(out)):
+        if out[i] <= out[i - 1]:
+            out[i] = out[i - 1] + 1e-4
+    return out
+
+
 def prepare(luma: Array, cfg: PrepConfig) -> Array:
     """Denoise, normalise and grade luma ahead of quantisation."""
     x = np.clip(luma, 0.0, 1.0)
+
+    if cfg.illumination > 0:
+        x = correct_illumination(x, cfg.illumination, cfg.illumination_sigma)
 
     if cfg.autolevel:
         lo = np.percentile(x, cfg.autolevel_clip)

@@ -42,7 +42,8 @@ def dump_stages(img: Image.Image, preset: Preset, outdir: str | Path, seed: int 
             0, 1,
         ).astype(np.float32)
 
-    masks = core.quantise(banding, preset.thresholds(), preset.prep)
+    cuts = core.resolve_thresholds(banding, preset.thresholds(), preset.prep.adaptive)
+    masks = core.quantise(banding, cuts, preset.prep)
 
     # bands as a stepped grey image, darkest band darkest
     idx = np.zeros((h, w), np.uint8)
@@ -63,6 +64,7 @@ def dump_stages(img: Image.Image, preset: Preset, outdir: str | Path, seed: int 
     stats = {
         "size": (w, h),
         "thresholds": preset.thresholds(),
+        "resolved_cuts": [round(c, 3) for c in cuts],
         "luma": {
             f"p{q}": round(float(np.percentile(prepared, q)), 3)
             for q in (1, 5, 25, 50, 75, 95, 99)

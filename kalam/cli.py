@@ -43,6 +43,10 @@ def apply_overrides(p: Preset, a: argparse.Namespace) -> Preset:
     if a.smooth is not None:
         p.prep.smooth_passes = a.smooth
 
+    if a.coverage is not None and a.coverage > 0:
+        for b in p.bands:
+            if b.threshold < 1.0:
+                b.threshold = float(min(0.999, b.threshold * a.coverage))
     if a.spacing_scale and a.spacing_scale != 1.0:
         for b in p.bands:
             b.style.spacing *= a.spacing_scale
@@ -99,6 +103,11 @@ def add_common(sp: argparse.ArgumentParser) -> None:
     g.add_argument("--width-scale", type=float, default=1.0)
     g.add_argument("--wobble-scale", type=float, default=1.0)
     g.add_argument("--angle", type=float, default=None, help="primary hatch angle, deg")
+    g.add_argument("--coverage", type=float, default=None,
+                   help="scale every band threshold; <1 means less ink overall. "
+                        "Needed because --gamma cannot change coverage when "
+                        "thresholds are adaptive (percentiles are invariant "
+                        "under any monotonic tone curve)")
     g.add_argument("--no-detail", action="store_true")
     g.add_argument("--no-silhouette", action="store_true")
 
