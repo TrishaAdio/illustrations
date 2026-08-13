@@ -34,7 +34,7 @@ Akhilesh spent his working life on the signal box at Ghatanpur Junction, where a
 mistake of ninety seconds kills people. He came out of it believing that
 everything has a timetable — not only trains.
 
-> The 4:40 goods. The milkman's second round. The temple bell. The hour the
+> The 4:30 goods. The milkman's second round. The temple bell. The hour the
 > crows quit the peepul by the water tank. When Nikunja-babu coughs on his
 > verandah. The Tuesday bus that is always eleven minutes late and never twelve.
 
@@ -120,7 +120,7 @@ relationship is a long negotiation over credit.
 **Sarojini**, his widowed sister-in-law, who keeps his house, disapproves of the
 paper, and is the only person permitted to interrupt him.
 
-**Bhondu**, a three-legged street dog who meets the 4:40 goods train every day
+**Bhondu**, a three-legged street dog who meets the 4:30 goods train every day
 without exception. When Bhondu is not at the platform, something is wrong. The
 dog is, functionally, a clock.
 
@@ -164,7 +164,7 @@ Mitul's dialogue is faster, more colloquial, and cuts across his.
 
 ## First case, sketched
 
-**সাড়ে চারটার মালগাড়ি** / *The 4:40 Goods*
+**সাড়ে চারটার মালগাড়ি** / *The 4:30 Goods*
 
 The dog is not on the platform. Akhilesh notices this before anyone notices the
 body, and spends the book insisting the two facts are one fact. A man comes back
