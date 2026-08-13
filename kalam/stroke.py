@@ -1,0 +1,410 @@
+"""
+Stroke primitives and renderers.
+
+Everything kalam draws is reduced to two device-independent primitives:
+
+    Stroke      - a polyline with a width profile (a pen mark)
+    FilledShape - a closed polygon with optional holes (a brush/ink mass)
+
+Geometry is produced once, then handed to a renderer. Two renderers exist:
+RasterRenderer (supersampled PIL) and SvgRenderer (print-ready vector).
+Keeping geometry separate from rasterisation is what makes vector output
+free instead of an afterthought.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+
+import numpy as np
+from PIL import Image, ImageDraw
+
+Array = np.ndarray
+
+
+# --------------------------------------------------------------------------
+# primitives
+# --------------------------------------------------------------------------
+
+
+@dataclass
+class Stroke:
+    """A pen mark: an open or closed polyline carrying a width profile."""
+
+    pts: Array  # (N, 2) float32, in output pixel space
+    width: float = 1.4  # nib width at the belly of the stroke
+    taper: float = 0.35  # fraction of half-length that tapers, 0 = blunt
+    end_width: float = 0.15  # width multiplier at the very tip
+    closed: bool = False
+    opacity: float = 1.0
+
+    def __post_init__(self) -> None:
+        self.pts = np.asarray(self.pts, dtype=np.float32).reshape(-1, 2)
+
+    @property
+    def length(self) -> float:
+        if len(self.pts) < 2:
+            return 0.0
+        d = np.diff(self.pts, axis=0)
+        return float(np.hypot(d[:, 0], d[:, 1]).sum())
+
+    def width_profile(self) -> Array:
+        """Per-vertex width. Tapered at both ends unless closed."""
+        n = len(self.pts)
+        if n == 0:
+            return np.zeros(0, dtype=np.float32)
+        if self.closed or self.taper <= 0 or n < 3:
+            return np.full(n, self.width, dtype=np.float32)
+
+        # normalised arc length 0..1
+        d = np.hypot(*np.diff(self.pts, axis=0).T)
+        s = np.concatenate([[0.0], np.cumsum(d)])
+        total = s[-1]
+        if total <= 1e-6:
+            return np.full(n, self.width, dtype=np.float32)
+        t = s / total
+
+        # distance from nearest end, normalised against the taper zone
+        edge = np.minimum(t, 1.0 - t) / max(self.taper, 1e-6)
+        ramp = np.clip(edge, 0.0, 1.0)
+        # smoothstep so the taper eases rather than kinking
+        ramp = ramp * ramp * (3.0 - 2.0 * ramp)
+        return (self.width * (self.end_width + (1.0 - self.end_width) * ramp)).astype(
+            np.float32
+        )
+
+
+@dataclass
+class FilledShape:
+    """An ink mass: filled outer ring, minus any holes."""
+
+    outer: Array  # (N, 2)
+    holes: list[Array] = field(default_factory=list)
+    opacity: float = 1.0
+
+    def __post_init__(self) -> None:
+        self.outer = np.asarray(self.outer, dtype=np.float32).reshape(-1, 2)
+        self.holes = [np.asarray(h, dtype=np.float32).reshape(-1, 2) for h in self.holes]
+
+
+@dataclass
+class Layer:
+    """A single ink. Plates are one or two of these (black, plus a spot)."""
+
+    name: str
+    colour: tuple[int, int, int] = (24, 22, 20)
+    strokes: list[Stroke] = field(default_factory=list)
+    shapes: list[FilledShape] = field(default_factory=list)
+    offset: tuple[float, float] = (0.0, 0.0)  # press misregistration
+    opacity: float = 1.0
+
+    def add(self, item: Stroke | FilledShape | None) -> None:
+        if item is None:
+            return
+        if isinstance(item, Stroke):
+            if len(item.pts) >= 2:
+                self.strokes.append(item)
+        else:
+            if len(item.outer) >= 3:
+                self.shapes.append(item)
+
+    def extend(self, items) -> None:
+        for it in items:
+            self.add(it)
+
+    def __len__(self) -> int:
+        return len(self.strokes) + len(self.shapes)
+
+
+# --------------------------------------------------------------------------
+# geometry helpers
+# --------------------------------------------------------------------------
+
+
+def resample(pts: Array, step: float = 2.0) -> Array:
+    """Resample a polyline to roughly even spacing.
+
+    Hatch runs arrive as bare endpoints; wobble and taper both need enough
+    vertices to actually bend, so everything gets resampled before displacement.
+    """
+    pts = np.asarray(pts, dtype=np.float32).reshape(-1, 2)
+    if len(pts) < 2:
+        return pts
+    d = np.hypot(*np.diff(pts, axis=0).T)
+    s = np.concatenate([[0.0], np.cumsum(d)])
+    total = float(s[-1])
+    if total < 1e-6:
+        return pts[:1]
+    n = max(2, int(np.ceil(total / max(step, 0.25))) + 1)
+    si = np.linspace(0.0, total, n)
+    out = np.empty((n, 2), dtype=np.float32)
+    out[:, 0] = np.interp(si, s, pts[:, 0])
+    out[:, 1] = np.interp(si, s, pts[:, 1])
+    return out
+
+
+def _smooth_noise(n: int, wavelength_samples: float, rng: np.random.Generator) -> Array:
+    """Smooth 1-D noise in [-1, 1], generated by interpolating random knots."""
+    if n <= 1:
+        return np.zeros(max(n, 0), dtype=np.float32)
+    k = max(2, int(np.ceil(n / max(wavelength_samples, 1.0))) + 2)
+    knots = rng.uniform(-1.0, 1.0, size=k)
+    kx = np.linspace(0.0, n - 1, k)
+    x = np.arange(n, dtype=np.float32)
+    if k >= 4:
+        # cubic interpolation via repeated linear smoothing is cheaper than a
+        # spline here and gives an indistinguishable result at these scales
+        v = np.interp(x, kx, knots)
+        win = max(3, int(wavelength_samples / 3) | 1)
+        kern = np.hanning(win)
+        kern /= kern.sum()
+        v = np.convolve(np.pad(v, win, mode="edge"), kern, mode="same")[win:-win]
+    else:
+        v = np.interp(x, kx, knots)
+    peak = float(np.abs(v).max())
+    if peak > 1e-6:
+        v = v / peak
+    return v.astype(np.float32)
+
+
+def wobble(
+    pts: Array,
+    rng: np.random.Generator,
+    amp: float = 0.9,
+    wavelength: float = 26.0,
+    step: float = 2.0,
+    drift: float = 0.0,
+) -> Array:
+    """Displace a polyline perpendicular to itself with smooth noise.
+
+    This is the single most important function in the project. Perfectly
+    straight hatching reads as machine output instantly; a sub-pixel wander
+    with a long wavelength is what makes a line look nib-drawn.
+    """
+    pts = resample(pts, step=step)
+    n = len(pts)
+    if n < 2 or amp <= 0:
+        return pts
+
+    # unit tangents -> normals
+    tan = np.gradient(pts, axis=0)
+    ln = np.hypot(tan[:, 0], tan[:, 1])
+    ln[ln < 1e-6] = 1.0
+    tan /= ln[:, None]
+    nrm = np.stack([-tan[:, 1], tan[:, 0]], axis=1)
+
+    wl_samples = max(wavelength / max(step, 0.25), 2.0)
+    disp = _smooth_noise(n, wl_samples, rng) * amp
+    # second, finer octave for nib chatter
+    disp += _smooth_noise(n, max(wl_samples / 3.5, 2.0), rng) * amp * 0.35
+
+    if drift > 0:
+        # a single slow bow across the whole stroke, like a wrist arc
+        t = np.linspace(0.0, np.pi, n)
+        disp += np.sin(t) * rng.uniform(-drift, drift)
+
+    return (pts + nrm * disp[:, None]).astype(np.float32)
+
+
+def jitter_endpoints(pts: Array, rng: np.random.Generator, amt: float = 1.2) -> Array:
+    """Nudge the ends of a stroke so runs of hatching don't align on a seam."""
+    if len(pts) < 2 or amt <= 0:
+        return pts
+    pts = pts.copy()
+    for i in (0, -1):
+        pts[i] += rng.uniform(-amt, amt, size=2).astype(np.float32)
+    return pts
+
+
+# --------------------------------------------------------------------------
+# raster renderer
+# --------------------------------------------------------------------------
+
+
+class RasterRenderer:
+    """Draws layers onto an RGB canvas by supersampling.
+
+    Strokes are drawn per-segment so the width profile can vary along the
+    stroke, with round caps at every vertex to keep joints smooth. Working at
+    3x and downsampling with Lanczos gives clean antialiasing without needing
+    a real vector rasteriser.
+    """
+
+    def __init__(self, size: tuple[int, int], supersample: int = 3):
+        self.w, self.h = size
+        self.ss = max(1, int(supersample))
+
+    def _layer_mask(self, layer: Layer) -> Image.Image:
+        ss = self.ss
+        mask = Image.new("L", (self.w * ss, self.h * ss), 0)
+        drw = ImageDraw.Draw(mask)
+        ox, oy = layer.offset
+
+        for shp in layer.shapes:
+            val = int(round(255 * shp.opacity))
+            poly = [((x + ox) * ss, (y + oy) * ss) for x, y in shp.outer]
+            if len(poly) >= 3:
+                drw.polygon(poly, fill=val)
+            for hole in shp.holes:
+                hp = [((x + ox) * ss, (y + oy) * ss) for x, y in hole]
+                if len(hp) >= 3:
+                    drw.polygon(hp, fill=0)
+
+        for st in layer.strokes:
+            val = int(round(255 * st.opacity))
+            pts = st.pts
+            wid = st.width_profile()
+            if st.closed and len(pts) >= 3:
+                pts = np.vstack([pts, pts[:1]])
+                wid = np.concatenate([wid, wid[:1]])
+            n = len(pts)
+            for i in range(n - 1):
+                x0, y0 = pts[i]
+                x1, y1 = pts[i + 1]
+                w = max(1.0, float(0.5 * (wid[i] + wid[i + 1])) * ss)
+                drw.line(
+                    [((x0 + ox) * ss, (y0 + oy) * ss), ((x1 + ox) * ss, (y1 + oy) * ss)],
+                    fill=val,
+                    width=int(round(w)),
+                )
+                # round cap keeps corners from notching
+                if w > 2.2:
+                    r = w / 2.0
+                    cx, cy = (x0 + ox) * ss, (y0 + oy) * ss
+                    drw.ellipse([cx - r, cy - r, cx + r, cy + r], fill=val)
+            if n >= 2 and float(wid[-1]) * ss > 2.2:
+                r = float(wid[-1]) * ss / 2.0
+                cx, cy = (pts[-1][0] + ox) * ss, (pts[-1][1] + oy) * ss
+                drw.ellipse([cx - r, cy - r, cx + r, cy + r], fill=val)
+
+        if ss > 1:
+            mask = mask.resize((self.w, self.h), Image.LANCZOS)
+        return mask
+
+    def render(self, layers: list[Layer], paper: Image.Image) -> Image.Image:
+        """Composite layers onto paper. Inks multiply, as wet ink does."""
+        canvas = paper.convert("RGB")
+        base = np.asarray(canvas, dtype=np.float32) / 255.0
+
+        for layer in layers:
+            if len(layer) == 0:
+                continue
+            alpha = np.asarray(self._layer_mask(layer), dtype=np.float32) / 255.0
+            alpha *= layer.opacity
+            ink = np.array(layer.colour, dtype=np.float32) / 255.0
+            a = alpha[:, :, None]
+            # multiply blend: ink darkens what is already there
+            base = base * (1.0 - a) + (base * ink) * a
+
+        out = np.clip(base * 255.0, 0, 255).astype(np.uint8)
+        return Image.fromarray(out, mode="RGB")
+
+
+# --------------------------------------------------------------------------
+# svg renderer
+# --------------------------------------------------------------------------
+
+
+def _fmt(v: float) -> str:
+    return f"{v:.2f}".rstrip("0").rstrip(".")
+
+
+class SvgRenderer:
+    """Emits the same geometry as SVG, for print or further editing.
+
+    Strokes with a varying width are written as filled outline polygons so the
+    taper survives; uniform strokes stay as cheap polylines.
+    """
+
+    def __init__(self, size: tuple[int, int]):
+        self.w, self.h = size
+
+    @staticmethod
+    def _outline(st: Stroke) -> Array | None:
+        """Offset a stroke into a closed polygon that honours its width."""
+        pts, wid = st.pts, st.width_profile()
+        if len(pts) < 2:
+            return None
+        tan = np.gradient(pts, axis=0)
+        ln = np.hypot(tan[:, 0], tan[:, 1])
+        ln[ln < 1e-6] = 1.0
+        tan /= ln[:, None]
+        nrm = np.stack([-tan[:, 1], tan[:, 0]], axis=1)
+        half = (wid / 2.0)[:, None]
+        left = pts + nrm * half
+        right = pts - nrm * half
+        return np.vstack([left, right[::-1]])
+
+    def render(
+        self,
+        layers: list[Layer],
+        paper_colour: tuple[int, int, int],
+        title: str = "kalam plate",
+    ) -> str:
+        def hexc(c) -> str:
+            return "#%02x%02x%02x" % tuple(int(v) for v in c)
+
+        out: list[str] = [
+            '<?xml version="1.0" encoding="UTF-8"?>',
+            f'<svg xmlns="http://www.w3.org/2000/svg" width="{self.w}" '
+            f'height="{self.h}" viewBox="0 0 {self.w} {self.h}">',
+            f"<title>{title}</title>",
+            f'<rect width="{self.w}" height="{self.h}" fill="{hexc(paper_colour)}"/>',
+        ]
+
+        for layer in layers:
+            if len(layer) == 0:
+                continue
+            ox, oy = layer.offset
+            out.append(
+                f'<g id="{layer.name}" fill="{hexc(layer.colour)}" '
+                f'stroke="none" style="mix-blend-mode:multiply" '
+                f'transform="translate({_fmt(ox)},{_fmt(oy)})" '
+                f'opacity="{_fmt(layer.opacity)}">'
+            )
+
+            for shp in layer.shapes:
+                d = ["M " + " L ".join(f"{_fmt(x)} {_fmt(y)}" for x, y in shp.outer) + " Z"]
+                for hole in shp.holes:
+                    d.append(
+                        "M " + " L ".join(f"{_fmt(x)} {_fmt(y)}" for x, y in hole) + " Z"
+                    )
+                out.append(f'<path fill-rule="evenodd" d="{" ".join(d)}"/>')
+
+            uniform: list[Stroke] = []
+            for st in layer.strokes:
+                wp = st.width_profile()
+                if float(wp.max() - wp.min()) < 0.12:
+                    uniform.append(st)
+                else:
+                    poly = self._outline(st)
+                    if poly is None:
+                        continue
+                    out.append(
+                        '<path d="M '
+                        + " L ".join(f"{_fmt(x)} {_fmt(y)}" for x, y in poly)
+                        + ' Z"/>'
+                    )
+
+            # group uniform-width strokes so the file stays small
+            by_width: dict[float, list[Stroke]] = {}
+            for st in uniform:
+                by_width.setdefault(round(float(st.width), 2), []).append(st)
+            for w, group in sorted(by_width.items()):
+                out.append(
+                    f'<g fill="none" stroke="{hexc(layer.colour)}" '
+                    f'stroke-width="{_fmt(w)}" stroke-linecap="round" '
+                    f'stroke-linejoin="round">'
+                )
+                for st in group:
+                    pts = st.pts
+                    d = "M " + " L ".join(f"{_fmt(x)} {_fmt(y)}" for x, y in pts)
+                    if st.closed:
+                        d += " Z"
+                    out.append(f'<path d="{d}"/>')
+                out.append("</g>")
+
+            out.append("</g>")
+
+        out.append("</svg>")
+        return "\n".join(out)
